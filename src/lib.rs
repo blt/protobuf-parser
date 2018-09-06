@@ -5,13 +5,36 @@
 
 #[macro_use]
 extern crate nom;
+#[macro_use]
+extern crate nom_locate;
 
 mod parser;
 
-use std::ops::Range;
-use parser::file_descriptor;
+use nom::types::CompleteStr;
+use nom_locate::LocatedSpan;
+pub use parser::Token;
+use std::convert::AsRef;
+use std::ops::RangeInclusive;
 
-/// Protobox syntax
+pub type Span<'a> = LocatedSpan<CompleteStr<'a>>;
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Word<'a> {
+    word: Span<'a>,
+}
+
+impl<'a> AsRef<str> for Word<'a> {
+    fn as_ref(&self) -> &str {
+        self.word.fragment.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Integer<'a> {
+    position: Span<'a>,
+    value: i32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Syntax {
     /// Protobuf syntax [2](https://developers.google.com/protocol-buffers/docs/proto) (default)
@@ -26,9 +49,31 @@ impl Default for Syntax {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PBOption<'a> {
+    position: Span<'a>,
+    key: Word<'a>,
+    value: Span<'a>,
+}
+
 /// A field rule
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub enum Rule {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rule<'a> {
+    position: Option<Span<'a>>,
+    pub variant: RuleVariant,
+}
+
+impl<'a> Default for Rule<'a> {
+    fn default() -> Rule<'a> {
+        Rule {
+            position: None,
+            variant: RuleVariant::Optional,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RuleVariant {
     /// A well-formed message can have zero or one of this field (but not more than one).
     Optional,
     /// This field can be repeated any number of times (including zero) in a well-formed message.
@@ -38,11 +83,18 @@ pub enum Rule {
     Required,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapKVPair<'a> {
+    position: Span<'a>,
+    key: FieldType<'a>,
+    value: FieldType<'a>,
+}
+
 /// Protobuf supported field types
 ///
 /// TODO: Groups (even if deprecated)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum FieldType {
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldType<'a> {
     /// Protobuf int32
     ///
     /// # Remarks
@@ -126,26 +178,26 @@ pub enum FieldType {
     /// Protobut float
     Float,
     /// Protobuf message or enum (holds the name)
-    MessageOrEnum(String),
+    MessageOrEnum(Word<'a>),
     /// Protobut map
-    Map(Box<(FieldType, FieldType)>),
+    Map(Box<MapKVPair<'a>>),
     /// Protobuf group (deprecated)
-    Group(Vec<Field>),
+    Group(Vec<Field<'a>>),
 }
 
 /// A Protobuf Field
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct Field {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Field<'a> {
     /// Field name
-    pub name: String,
+    pub name: Word<'a>,
     /// Field `Rule`
-    pub rule: Rule,
+    pub rule: Rule<'a>,
     /// Field type
-    pub typ: FieldType,
+    pub typ: FieldType<'a>,
     /// Tag number
-    pub number: i32,
+    pub number: Integer<'a>,
     /// Default value for the field
-    pub default: Option<String>,
+    pub default: Option<Word<'a>>,
     /// Packed property for repeated fields
     pub packed: Option<bool>,
     /// Is the field deprecated
@@ -154,91 +206,59 @@ pub struct Field {
 
 /// A protobuf message
 #[derive(Debug, Clone, Default)]
-pub struct Message {
+pub struct Message<'a> {
     /// Message name
-    pub name: String,
+    pub name: Option<Word<'a>>,
     /// Message `Field`s
-    pub fields: Vec<Field>,
+    pub fields: Vec<Field<'a>>,
     /// Message `OneOf`s
-    pub oneofs: Vec<OneOf>,
+    pub oneofs: Vec<OneOf<'a>>,
     /// Message reserved numbers
-    ///
-    /// TODO: use RangeInclusive once stable
-    pub reserved_nums: Vec<Range<i32>>,
+    pub reserved_nums: Vec<RangeInclusive<i32>>,
     /// Message reserved names
-    pub reserved_names: Vec<String>,
+    pub reserved_names: Vec<Word<'a>>,
     /// Nested messages
-    pub messages: Vec<Message>,
+    pub messages: Vec<Message<'a>>,
     /// Nested enums
-    pub enums: Vec<Enumeration>,
+    pub enums: Vec<Enumeration<'a>>,
 }
 
 /// A protobuf enumeration field
 #[derive(Debug, Clone)]
-pub struct EnumValue {
+pub struct EnumValue<'a> {
     /// enum value name
-    pub name: String,
+    pub name: Word<'a>,
     /// enum value number
-    pub number: i32,
+    pub number: Integer<'a>,
 }
 
 /// A protobuf enumerator
 #[derive(Debug, Clone)]
-pub struct Enumeration {
+pub struct Enumeration<'a> {
     /// enum name
-    pub name: String,
+    pub name: Word<'a>,
     /// enum values
-    pub values: Vec<EnumValue>,
+    pub values: Vec<EnumValue<'a>>,
 }
 
 /// A OneOf
-#[derive(Debug, Clone, Default)]
-pub struct OneOf {
+#[derive(Debug, Clone)]
+pub struct OneOf<'a> {
+    position: Span<'a>,
     /// OneOf name
-    pub name: String,
+    pub name: Word<'a>,
     /// OneOf fields
-    pub fields: Vec<Field>,
+    pub fields: Vec<Field<'a>>,
 }
 
 #[derive(Debug, Clone)]
-pub struct Extension {
+pub struct Extension<'a> {
     /// Extend this type with field
-    pub extendee: String,
+    pub extendee: Word<'a>,
     /// Extension field
-    pub field: Field,
+    pub field: Field<'a>,
 }
 
-/// A File descriptor representing a whole .proto file
-#[derive(Debug, Default, Clone)]
-pub struct FileDescriptor {
-    /// Imports
-    pub import_paths: Vec<String>,
-    /// Package
-    pub package: String,
-    /// Protobuf Syntax
-    pub syntax: Syntax,
-    /// Top level messages
-    pub messages: Vec<Message>,
-    /// Enums
-    pub enums: Vec<Enumeration>,
-    /// Extensions
-    pub extensions: Vec<Extension>,
-}
-
-impl FileDescriptor {
-    /// Parses a .proto file content into a `FileDescriptor`
-    pub fn parse<S: AsRef<[u8]>>(file: S) -> Result<Self, ::nom::IError> {
-        let file = file.as_ref();
-        match file_descriptor(file) {
-            ::nom::IResult::Done(unparsed, r) => {
-                if !unparsed.is_empty() {
-                    // TODO: make error detection part of parser and report position
-                    Err(::nom::IError::Error(::nom::ErrorKind::NoneOf))
-                } else {
-                    Ok(r)
-                }
-            }
-            o => o.to_full_result(),
-        }
-    }
+pub fn tokenize<'a>(proto: &'a str) -> Result<(Span<'a>, Vec<Token<'a>>), ::nom::Err<Span<'a>>> {
+    parser::tokenize(LocatedSpan::new(CompleteStr(proto)))
 }
