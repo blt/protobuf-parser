@@ -12,7 +12,6 @@ mod parser;
 
 use nom::types::CompleteStr;
 use nom_locate::LocatedSpan;
-pub use parser::Token;
 use std::convert::AsRef;
 use std::ops::RangeInclusive;
 
@@ -50,9 +49,24 @@ impl Default for Syntax {
 }
 
 #[derive(Debug, Clone)]
-pub struct PBOption<'a> {
-    position: Span<'a>,
+pub struct BracketOption<'a> {
     key: Word<'a>,
+    // TODO(blt) This being a Span stinks. We should, instead, have a parser for
+    // ProtoValue or some such, which can be an integer, string or bool.
+    value: Span<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeclOptionName<'a> {
+    BuiltIn(Word<'a>),
+    Custom(Word<'a>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclOption<'a> {
+    name: DeclOptionName<'a>,
+    // TODO(blt) This being a Span stinks. We should, instead, have a parser for
+    // ProtoValue or some such, which can be an integer, string or bool.
     value: Span<'a>,
 }
 
@@ -259,6 +273,28 @@ pub struct Extension<'a> {
     pub field: Field<'a>,
 }
 
-pub fn tokenize<'a>(proto: &'a str) -> Result<(Span<'a>, Vec<Token<'a>>), ::nom::Err<Span<'a>>> {
-    parser::tokenize(LocatedSpan::new(CompleteStr(proto)))
+// NOTE(blt): It's possible that an invalid proto file will still parse into an
+// AbstractProto. The careful user will perform validation.
+#[derive(Debug, Default, Clone)]
+pub struct AbstractProto<'a> {
+    /// Imports
+    pub import_paths: Vec<Word<'a>>,
+    /// Package
+    pub package: Option<Word<'a>>,
+    /// Protobuf Syntax
+    pub syntax: Syntax,
+    /// Top level messages
+    pub messages: Vec<Message<'a>>,
+    /// Top level options
+    pub options: Vec<DeclOption<'a>>,
+    /// Enums
+    pub enums: Vec<Enumeration<'a>>,
+    /// Extensions
+    pub extensions: Vec<Extension<'a>>,
+}
+
+pub fn parse<'a>(
+    proto_txt: &'a str,
+) -> Result<(Span<'a>, AbstractProto<'a>), ::nom::Err<Span<'a>>> {
+    parser::parse(LocatedSpan::new(CompleteStr(proto_txt)))
 }

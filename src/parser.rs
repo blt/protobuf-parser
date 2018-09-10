@@ -54,10 +54,9 @@ named!(block_comment(Span) -> (), do_parse!(
 
 /// word break: multispace or comment
 named!(br(Span) -> (), do_parse!(
-    alt!(
-        map!(nom::multispace, |_| ())
-            | comment
-            | block_comment)
+    alt!(map!(nom::multispace, |_| ())
+         | comment
+         | block_comment )
         >> ()
 ));
 
@@ -136,10 +135,9 @@ named!(reserved_names(Span) -> Vec<Word>, do_parse!(
 ));
 
 // formerly key_val
-named!(bracket_option(Span) -> PBOption, do_parse!(
+named!(bracket_option(Span) -> BracketOption, do_parse!(
     tag!("[")
         >> many0!(br)
-        >> position: position!()
         >> key: word
         >> many0!(br)
         >> tag!("=")
@@ -147,8 +145,7 @@ named!(bracket_option(Span) -> PBOption, do_parse!(
         >> value: is_not!("]")
         >> tag!("]")
         >> many0!(br)
-        >> (PBOption {
-            position: position,
+        >> (BracketOption {
             key: key,
             value: value
         })
@@ -239,6 +236,11 @@ named!(group_fields_or_semicolon(Span) -> Option<Vec<Field>>, do_parse!(
     )
         >> (res)
 ));
+
+// TODO(blt) This must be extended to support custom options. These are normal
+// fields but with a slightly different syntax, like:
+//
+//    option (my_option) = "Hello world!";
 
 named!(message_field(Span) -> Field, do_parse!(
     rule: opt!(rule)
@@ -397,11 +399,36 @@ named!(enumerator(Span) -> Enumeration, do_parse!(
         })
 ));
 
-named!(option_ignore(Span) -> (), do_parse!(
+named!(decl_option_custom_name(Span) -> DeclOptionName, do_parse!(
+    tag!("(")
+        >> many0!(br)
+        >> name: word
+        >> many0!(br)
+        >> tag!(")")
+        >> (DeclOptionName::Custom(name))
+));
+
+named!(decl_option_builtin_name(Span) -> DeclOptionName, do_parse!(
+    many0!(br)
+        >> name: word
+        >> many0!(br)
+        >> (DeclOptionName::BuiltIn(name))
+));
+
+named!(option(Span) -> DeclOption, do_parse!(
     tag!("option")
         >> many1!(br)
-        >> take_until_and_consume!(";")
-        >> ()
+        >> name: alt!(decl_option_custom_name | decl_option_builtin_name)
+        >> many0!(br)
+        >> tag!("=")
+        >> many0!(br)
+        >> value: take_until!(";")
+        >> many0!(br)
+        >> many0!(tag!(";"))
+        >> (DeclOption {
+            name: name,
+            value: value
+        })
 ));
 
 named!(service_ignore(Span) -> (), do_parse!(
@@ -414,32 +441,51 @@ named!(service_ignore(Span) -> (), do_parse!(
         >> ()
 ));
 
-pub enum Token<'a> {
+#[derive(Debug, Clone)]
+pub enum Event<'a> {
     Syntax(Syntax),
     Import(Word<'a>),
     Package(Word<'a>),
     Message(Message<'a>),
     Enum(Enumeration<'a>),
+    DeclOption(DeclOption<'a>),
     Extensions(Vec<Extension<'a>>),
     Ignore,
 }
 
-named!(token(Span) -> Token, do_parse!(
+named!(event(Span) -> Event, do_parse!(
     res: alt!(
-        syntax => { |s| Token::Syntax(s) }
-        | import => { |i| Token::Import(i) }
-        | package => { |p| Token::Package(p) }
-        | message => { |m| Token::Message(m) }
-        | enumerator => { |e| Token::Enum(e) }
-        | extensions => { |e| Token::Extensions(e) }
-        | option_ignore => { |_| Token::Ignore }
-        | service_ignore => { |_| Token::Ignore }
-        | br => { |_| Token::Ignore })
+        syntax => { |s| Event::Syntax(s) }
+        | import => { |i| Event::Import(i) }
+        | package => { |p| Event::Package(p) }
+        | message => { |m| Event::Message(m) }
+        | enumerator => { |e| Event::Enum(e) }
+        | extensions => { |e| Event::Extensions(e) }
+        | option => { |o| Event::DeclOption(o) }
+        | service_ignore => { |_| Event::Ignore }
+        | br => { |_| Event::Ignore })
         >> (res)
 ));
 
-named!(pub tokenize(Span) -> Vec<Token>, do_parse!(
-    res: many0!(token)
+named!(pub parse(Span) -> AbstractProto, do_parse!(
+    res: map!(many0!(event), |events: Vec<Event>| {
+        let mut desc = AbstractProto::default();
+        for event in events {
+            // TODO(blt) provide some validation here. For instance, we can
+            // confirm that the package isn't set multiple times.
+            match event {
+                Event::Syntax(s) => desc.syntax = s,
+                Event::Import(i) => desc.import_paths.push(i),
+                Event::Package(p) => desc.package = Some(p),
+                Event::Message(m) => desc.messages.push(m),
+                Event::Enum(e) => desc.enums.push(e),
+                Event::Extensions(e) => desc.extensions.extend(e),
+                Event::DeclOption(d) => desc.options.push(d),
+                Event::Ignore => (),
+            }
+        }
+        desc
+    })
         >> (res)
 ));
 
@@ -527,28 +573,47 @@ mod test {
         );
     }
 
-    // #[test]
-    // fn test_message() {
-    //     let msg = r#"message ReferenceData
-    // {
-    //     repeated ScenarioInfo  scenarioSet = 1;
-    //     repeated CalculatedObjectInfo calculatedObjectSet = 2;
-    //     repeated RiskFactorList riskFactorListSet = 3;
-    //     repeated RiskMaturityInfo riskMaturitySet = 4;
-    //     repeated IndicatorInfo indicatorSet = 5;
-    //     repeated RiskStrikeInfo riskStrikeSet = 6;
-    //     repeated FreeProjectionList freeProjectionListSet = 7;
-    //     repeated ValidationProperty ValidationSet = 8;
-    //     repeated CalcProperties calcPropertiesSet = 9;
-    //     repeated MaturityInfo maturitySet = 10;
-    // }"#;
+    #[test]
+    fn test_message() {
+        let input = Span::new(CompleteStr(
+            r#"message Person {
+  string name = 1;
+    int32 id = 2;  // Unique ID number for this person.
+      string email = 3;
 
-    //     let mess = message(msg.as_bytes());
-    //     assert!(mess.is_ok());
-    //     if let Ok((_, mess)) = mess {
-    //         assert_eq!(10, mess.fields.len());
-    //     }
-    // }
+  enum PhoneType {
+      /* a single line block comment */
+      MOBILE = 0;
+          HOME = 1;
+              // a line comment
+              WORK = 2;
+                }
+
+  message PhoneNumber {
+      /*
+       * oh dang, check this out all the comments
+       */
+      string number = 1;
+          PhoneType type = 2;
+            }
+
+  repeated PhoneNumber phones = 4;
+
+  google.protobuf.Timestamp last_updated = 5;
+    }"#,
+        ));
+        let output: Result<(Span, Message), _> = message(input);
+        assert!(output.is_ok());
+        let (remainder, _msg) = output.unwrap();
+        assert_eq!(
+            remainder,
+            LocatedSpan {
+                offset: 539,
+                line: 25,
+                fragment: CompleteStr("")
+            }
+        );
+    }
 
     // #[test]
     // fn test_enum() {
@@ -566,15 +631,76 @@ mod test {
     //     }
     // }
 
-    // #[test]
-    // fn test_ignore() {
-    //     let msg = r#"option optimize_for = SPEED;"#;
+    #[test]
+    fn test_builtin_option() {
+        let input = Span::new(CompleteStr(r#"option optimize_for = SPEED;"#));
+        let output: Result<(Span, DeclOption), _> = option(input);
 
-    //     match option_ignore(msg.as_bytes()) {
-    //         Ok(_) => (),
-    //         e => panic!("Expecting done {:?}", e),
-    //     }
-    // }
+        println!("OUTPUT: {:?}", output);
+        assert!(output.is_ok());
+        let (remainder, msg) = output.unwrap();
+        println!("MSG: {:?}", msg);
+        assert_eq!(
+            msg,
+            DeclOption {
+                name: DeclOptionName::BuiltIn(Word {
+                    word: LocatedSpan {
+                        offset: 7,
+                        line: 1,
+                        fragment: CompleteStr("optimize_for")
+                    }
+                }),
+                value: LocatedSpan {
+                    offset: 22,
+                    line: 1,
+                    fragment: CompleteStr("SPEED")
+                }
+            }
+        );
+        assert_eq!(
+            remainder,
+            LocatedSpan {
+                offset: 28,
+                line: 1,
+                fragment: CompleteStr("")
+            }
+        );
+    }
+
+    #[test]
+    fn test_custom_option() {
+        let input = Span::new(CompleteStr(r#"option (unity.optimize_for) = lolSPEED;"#));
+        let output: Result<(Span, DeclOption), _> = option(input);
+
+        println!("OUTPUT: {:?}", output);
+        assert!(output.is_ok());
+        let (remainder, msg) = output.unwrap();
+        assert_eq!(
+            msg,
+            DeclOption {
+                name: DeclOptionName::Custom(Word {
+                    word: LocatedSpan {
+                        offset: 8,
+                        line: 1,
+                        fragment: CompleteStr("unity.optimize_for")
+                    }
+                }),
+                value: LocatedSpan {
+                    offset: 30,
+                    line: 1,
+                    fragment: CompleteStr("lolSPEED")
+                }
+            }
+        );
+        assert_eq!(
+            remainder,
+            LocatedSpan {
+                offset: 39,
+                line: 1,
+                fragment: CompleteStr("")
+            }
+        );
+    }
 
     // #[test]
     // fn test_import() {
